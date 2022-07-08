@@ -1,0 +1,36 @@
+version: "3.4"
+services:
+  builder:
+    build:
+      context: .
+    volumes:
+      - .:/app
+    working_dir: /app
+    tty: true
+    depends_on:
+      - postgres
+    networks:
+      - intranet
+
+  postgres:
+    image: postgres:14.3-alpine3.15
+    volumes:
+      - "postgres-data:/var/lib/postgresql/data"
+      - "./db/initdb.d/:/docker-entrypoint-initdb.d/"
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: abc123
+      POSTGRES_DB: mr-eventstore
+    stop_signal: SIGKILL
+    ports:
+      - 5432:5432
+    networks:
+      - intranet
+
+networks:
+  intranet:
+    driver: bridge
+
+volumes:
+  postgres-data:
