@@ -3,46 +3,92 @@ package eventsource
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"reflect"
 )
 
-func NewRepository(agr AggregateRoot, store EventStore, m EventMarshaler) AggregateRootRepository {
-	typ := reflect.TypeOf(agr)
+type Option func(r *AggregateRepository)
+
+func WithMarshaler(m EventMarshaler) Option {
+	return func(r *AggregateRepository) {
+		r.Marshaler = m
+	}
+}
+
+func WithEventStore(s EventStore) Option {
+	return func(r *AggregateRepository) {
+		r.store = s
+	}
+}
+
+func WithSnapRepository(s SnapshotStore, m SnapshotMarshaler) Option {
+	return func(r *AggregateRepository) {
+		r.snaprepo = NewSnapRepository(s, m)
+	}
+}
+
+func WithDefaultSnapRepository(states ...interface{}) Option {
+	m := &JsonSnapshotMarshaler{}
+	m.Bind(states...)
+
+	return func(r *AggregateRepository) {
+		r.snaprepo = &SnapshotRepository{
+			marshaler: m,
+			store:     NewInmemSnapStore(),
+		}
+	}
+}
+
+func NewRepository(aggr AggregateRoot, opts ...Option) AggregateRootRepository {
+	typ := reflect.TypeOf(aggr)
 	if typ.Kind() == reflect.Ptr {
 		typ = typ.Elem()
 	}
 
-	return &repository{
+	repo := &AggregateRepository{
 		aggregate: typ,
-		store:     store,
-		marshaler: m,
+		store:     NewInmemEventStore(),
+		Marshaler: &JsonEventMarshaler{},
 	}
+
+	for _, opt := range opts {
+		opt(repo)
+	}
+
+	if _, ok := aggr.(SnapshottingBehaviour); ok && repo.snaprepo == nil {
+		_, err := fmt.Printf("%T must provide AggregateRootSnapshotRepository implementation\n", aggr)
+		panic(err)
+	}
+
+	return repo
 }
 
-type repository struct {
+type AggregateRepository struct {
 	aggregate reflect.Type
 	store     EventStore
-	marshaler EventMarshaler
+	Marshaler EventMarshaler
+	snaprepo  AggregateRootSnapshotRepository
 }
 
-func (r *repository) New() AggregateRoot {
-	return reflect.New(r.aggregate).Interface().(AggregateRoot)
+func (r *AggregateRepository) New() interface{} {
+	return reflect.New(r.aggregate).Interface()
 }
 
-func (r *repository) Save(ctx context.Context, agr AggregateRoot) error {
-	if agr.AggregateRootID() == "" {
+func (r *AggregateRepository) Save(ctx context.Context, aggr AggregateRoot) error {
+	if aggr.AggregateRootID() == "" {
 		return errors.New("empty AggregateRootID")
 	}
-	defer agr.CommitEvents()
+	defer aggr.CommitEvents()
 
-	events := agr.GetUncommitedEvents()
+	events := aggr.GetUncommitedEvents()
 	if len(events) == 0 {
 		return nil
 	}
 
 	var history History
 	for _, e := range events {
-		model, err := r.marshaler.Marshal(e)
+		model, err := r.Marshaler.Marshal(e)
 		if err != nil {
 			return err
 		}
@@ -50,22 +96,46 @@ func (r *repository) Save(ctx context.Context, agr AggregateRoot) error {
 		history = append(history, model)
 	}
 
-	return r.store.SaveEvents(ctx, agr.AggregateRootID(), history, agr.Version())
+	err := r.store.SaveEvents(ctx, aggr.AggregateRootID(), history, aggr.Version())
+	if err != nil {
+		return err
+	}
+
+	if v, ok := aggr.(SnapshottingBehaviour); ok {
+		if v.StreamSize()%v.SnapshotInterval() == 0 {
+			snap := SnapshotSkeleton{
+				ID:      v.AggregateRootID(),
+				Version: aggr.Version(),
+				State:   v.GetState(),
+			}
+
+			if err := r.snaprepo.Save(ctx, snap); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
-func (r *repository) GetByID(ctx context.Context, agrID string) (AggregateRoot, error) {
-	history, err := r.store.GetEventsForAggregate(ctx, agrID, 1)
+func (r *AggregateRepository) GetByID(ctx context.Context, aggrID string) (AggregateRoot, error) {
+	aggregate, err := r.LoadFromSnap(ctx, aggrID)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(history) == 0 {
-		return nil, errors.New("not found")
+	if aggregate != nil {
+		return aggregate, nil
+	}
+
+	history, err := r.store.GetEventsForAggregate(ctx, aggrID, 0)
+	if err != nil {
+		return nil, err
 	}
 
 	var events []Event
 	for _, model := range history {
-		event, err := r.marshaler.Unmarshal(model)
+		event, err := r.Marshaler.Unmarshal(model)
 		if err != nil {
 			return nil, err
 		}
@@ -73,11 +143,94 @@ func (r *repository) GetByID(ctx context.Context, agrID string) (AggregateRoot, 
 		events = append(events, event)
 	}
 
-	aggregate := r.New()
-
-	if err := aggregate.LoadFromHistory(events); err != nil {
+	aggr, _ := r.New().(AggregateRoot)
+	if err := aggr.LoadFromHistory(events); err != nil {
 		return nil, err
 	}
 
-	return aggregate, nil
+	return aggr, nil
+}
+
+func (r *AggregateRepository) LoadFromSnap(ctx context.Context, aggrID string) (SnapshottingBehaviour, error) {
+	if aggr, ok := r.New().(SnapshottingBehaviour); ok {
+		if !ok || !aggr.SnapshottingEnable() {
+			return nil, nil
+		}
+
+		snap, err := r.snaprepo.GetByID(ctx, aggr.AggregateRootID(), 0)
+		if err != nil {
+			if errors.Is(err, ErrSnapNotFound) {
+				return nil, nil
+			}
+
+			return nil, err
+		}
+
+		version := snap.CurrentVersion()
+		aggr.ApplyState(snap)
+
+		history, err := r.store.GetEventsForAggregate(ctx, aggrID, version)
+		if err != nil {
+			return nil, err
+		}
+
+		var events []Event
+		for _, model := range history {
+			event, err := r.Marshaler.Unmarshal(model)
+			if err != nil {
+				return nil, err
+			}
+
+			events = append(events, event)
+		}
+
+		if err := aggr.LoadFromHistory(events); err != nil {
+			return nil, err
+		}
+
+		return aggr, nil
+	}
+
+	return nil, nil
+}
+
+func NewSnapRepository(store SnapshotStore, marshaler SnapshotMarshaler) AggregateRootSnapshotRepository {
+	return &SnapshotRepository{
+		store:     store,
+		marshaler: marshaler,
+	}
+}
+
+type SnapshotRepository struct {
+	store     SnapshotStore
+	marshaler SnapshotMarshaler
+}
+
+func (r *SnapshotRepository) Save(ctx context.Context, snap Snapshot) error {
+	model, err := r.marshaler.Marshal(snap)
+	if err != nil {
+		return fmt.Errorf("unable to marshal snapshot: %v", err)
+	}
+
+	r.store.SaveSnapshot(ctx, snap.AggregateRootID(), model, snap.CurrentVersion())
+
+	return nil
+}
+
+func (r *SnapshotRepository) GetByID(ctx context.Context, agrID string, version int) (Snapshot, error) {
+	if version == 0 {
+		version = math.MaxInt32
+	}
+
+	model, err := r.store.GetSnapshotForAggregate(ctx, agrID, version)
+	if err != nil {
+		return nil, err
+	}
+
+	snap, err := r.marshaler.Unmarshal(model)
+	if err != nil {
+		return nil, err
+	}
+
+	return snap, nil
 }

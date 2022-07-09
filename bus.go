@@ -65,7 +65,7 @@ func (b *commandBus) Send(ctx context.Context, cmd interface{}) error {
 
 	var aggregate AggregateRoot
 	if v, ok := agrCmd.(Constructor); ok && v.New() {
-		aggregate = b.repo.New()
+		aggregate = b.repo.New().(AggregateRoot)
 	} else {
 		aggregateID := agrCmd.AggregateID()
 		v, err := b.repo.GetByID(ctx, aggregateID)

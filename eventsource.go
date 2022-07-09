@@ -16,8 +16,8 @@ type Event interface {
 	EventAt() time.Time
 }
 
-// EventModel provides a default implementation of an Event that is suitable for being embedded
-type EventModel struct {
+// EventSkeleton provides a default implementation of an Event that is suitable for being embedded
+type EventSkeleton struct {
 	// ID contains the AggregateID
 	ID string
 
@@ -29,17 +29,17 @@ type EventModel struct {
 }
 
 // AggregateID implements part of the Event interface
-func (m EventModel) AggregateID() string {
+func (m EventSkeleton) AggregateID() string {
 	return m.ID
 }
 
 // EventVersion implements part of the Event interface
-func (m EventModel) EventVersion() int {
+func (m EventSkeleton) EventVersion() int {
 	return m.Version
 }
 
 // EventAt implements part of the Event interface
-func (m EventModel) EventAt() time.Time {
+func (m EventSkeleton) EventAt() time.Time {
 	return m.At
 }
 
@@ -52,37 +52,88 @@ type AggregateRoot interface {
 	CommitEvents()
 }
 
-type AggregateRootModel struct {
-	ID      string
-	Version int
+type AggregateRootRepository interface {
+	New() interface{}
+	Save(ctx context.Context, agr AggregateRoot) error
+	GetByID(ctx context.Context, aggregateRootID string) (AggregateRoot, error)
 }
 
-type AggregateRootRepository interface {
-	New() AggregateRoot
-	Save(ctx context.Context, agr AggregateRoot) error
-	GetByID(ctx context.Context, id string) (AggregateRoot, error)
+// EventModel provides the shape of the records to be saved to the db
+type EventModel struct {
+	// Version is the event version the Data represents
+	Version int
+
+	// At indicates when the event happened; provided as a utility for the store
+	At EpochMillis
+
+	// Data contains the Serializer encoded version of the data
+	Data []byte
+}
+
+type History []EventModel
+
+type EventStore interface {
+	SaveEvents(ctx context.Context, aggrID string, models History, version int) error
+	GetEventsForAggregate(ctx context.Context, aggrID string, version int) (History, error)
 }
 
 type SnapshottingBehaviour interface {
+	AggregateRoot
+	StreamSize() int
 	SnapshotInterval() int
-	CurrentState() interface{}
+	GetState() interface{}
+	ApplyState(s Snapshot)
+	SnapshottingEnable() bool
 }
 
-type AggregateRootIDMarshaler interface {
-	Marshal() (string, error)
+type Snapshot interface {
+	CurrentVersion() int
+	GetState() interface{}
+	AggregateRootID() string
 }
 
-type AggregateRootIDUnmarshaler interface {
-	Unmarshal(data string) error
+type SnapshotSkeleton struct {
+	ID      string
+	Version int
+	State   interface{}
 }
 
-type EventStore interface {
-	SaveEvents(ctx context.Context, agrID string, models History, version int) error
-	GetEventsForAggregate(ctx context.Context, agrID string, version int) (History, error)
+func (s SnapshotSkeleton) GetState() interface{} {
+	return s.State
+}
+
+func (s SnapshotSkeleton) CurrentVersion() int {
+	return s.Version
+}
+
+func (s SnapshotSkeleton) AggregateRootID() string {
+	return s.ID
+}
+
+type AggregateRootSnapshotRepository interface {
+	Save(ctx context.Context, snap Snapshot) error
+	GetByID(ctx context.Context, aggregateRootID string, version int) (Snapshot, error)
+}
+
+type SnapshotModel struct {
+	ID      string
+	Version int
+	Data    []byte
+}
+
+type SnapshotStore interface {
+	SaveSnapshot(ctx context.Context, agrID string, model SnapshotModel, version int) error
+	GetSnapshotForAggregate(ctx context.Context, agrID string, version int) (SnapshotModel, error)
 }
 
 type EventMarshaler interface {
 	Bind(e ...Event) error
-	Marshal(e Event) (Model, error)
-	Unmarshal(e Model) (Event, error)
+	Marshal(e Event) (EventModel, error)
+	Unmarshal(e EventModel) (Event, error)
+}
+
+type SnapshotMarshaler interface {
+	Bind(v ...interface{}) error
+	Marshal(s Snapshot) (SnapshotModel, error)
+	Unmarshal(m SnapshotModel) (Snapshot, error)
 }

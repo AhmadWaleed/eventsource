@@ -12,9 +12,9 @@ const (
 	Shipped  = "shipped"
 )
 
-type ShipmentPacked struct{ EventModel }
-type ShipmentPickedUp struct{ EventModel }
-type ShipmentShipped struct{ EventModel }
+type ShipmentPacked struct{ EventSkeleton }
+type ShipmentPickedUp struct{ EventSkeleton }
+type ShipmentShipped struct{ EventSkeleton }
 
 func NewShipment() *Shipment {
 	return &Shipment{sku: "abc123"}
@@ -39,17 +39,17 @@ func (s *Shipment) Handle(ctx context.Context, v interface{}) error {
 	var e Event
 	switch cmd := v.(type) {
 	case PackShipment:
-		e = &ShipmentPacked{EventModel{
+		e = &ShipmentPacked{EventSkeleton{
 			At: time.Now(),
 			ID: cmd.AggregateID(),
 		}}
 	case PickupShipment:
-		e = &ShipmentPickedUp{EventModel{
+		e = &ShipmentPickedUp{EventSkeleton{
 			At: time.Now(),
 			ID: cmd.AggregateID(),
 		}}
 	case ShipShipment:
-		e = &ShipmentShipped{EventModel{
+		e = &ShipmentShipped{EventSkeleton{
 			At: time.Now(),
 			ID: cmd.AggregateID(),
 		}}
@@ -109,15 +109,16 @@ type ShipShipment struct{ Command }
 func (PackShipment) New() bool { return true }
 
 func Example() {
+	marshaler := new(JsonEventMarshaler)
+	marshaler.Bind(ShipmentPacked{}, ShipmentPickedUp{}, ShipmentShipped{})
+
 	var (
-		ctx       = context.Background()
-		marshalel = new(JsonMarshaller)
-		shipment  = NewShipment()
-		repo      = NewRepository(shipment, NewInmemStore(), marshalel)
-		bus       = NewCommandBus(repo)
+		ctx      = context.Background()
+		shipment = NewShipment()
+		repo     = NewRepository(shipment, WithMarshaler(marshaler))
+		bus      = NewCommandBus(repo)
 	)
 
-	marshalel.Bind(ShipmentPacked{}, ShipmentPickedUp{}, ShipmentShipped{})
 	bus.Send(ctx, PackShipment{Command{ID: shipment.AggregateRootID()}})
 	aggregate, _ := repo.GetByID(ctx, shipment.AggregateRootID())
 

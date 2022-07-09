@@ -16,9 +16,9 @@ const (
 )
 
 // Events
-type FlightPrepared struct{ eventsource.EventModel }
-type FlightDepartured struct{ eventsource.EventModel }
-type FlightLanded struct{ eventsource.EventModel }
+type FlightPrepared struct{ eventsource.EventSkeleton }
+type FlightDepartured struct{ eventsource.EventSkeleton }
+type FlightLanded struct{ eventsource.EventSkeleton }
 
 func NewFlight(num string) *Flight {
 	return &Flight{number: num}
@@ -33,7 +33,7 @@ type Flight struct {
 }
 
 func (f *Flight) Ready() error {
-	e := &FlightPrepared{eventsource.EventModel{
+	e := &FlightPrepared{eventsource.EventSkeleton{
 		At: time.Now(),
 		ID: f.number,
 	}}
@@ -42,7 +42,7 @@ func (f *Flight) Ready() error {
 }
 
 func (f *Flight) Depart() error {
-	e := &FlightDepartured{eventsource.EventModel{
+	e := &FlightDepartured{eventsource.EventSkeleton{
 		At: time.Now(),
 		ID: f.number,
 	}}
@@ -51,7 +51,7 @@ func (f *Flight) Depart() error {
 }
 
 func (f *Flight) Land() error {
-	e := &FlightLanded{eventsource.EventModel{
+	e := &FlightLanded{eventsource.EventSkeleton{
 		At: time.Now(),
 		ID: f.number,
 	}}
@@ -143,15 +143,15 @@ func (logcmd) Before(_ context.Context, v interface{}) error {
 }
 
 func main() {
-	var (
-		ctx       = context.Background()
-		marshalel = new(eventsource.JsonMarshaller)
-		flight    = NewFlight("ABC-1233")
-		repo      = eventsource.NewRepository(flight, eventsource.NewInmemStore(), marshalel)
-		bus       = eventsource.NewCommandBus(repo, logcmd{})
-	)
+	marshaler := new(eventsource.JsonEventMarshaler)
+	marshaler.Bind(FlightPrepared{}, FlightDepartured{}, FlightLanded{})
 
-	marshalel.Bind(FlightPrepared{}, FlightDepartured{}, FlightLanded{})
+	var (
+		ctx    = context.Background()
+		flight = NewFlight("ABC-1233")
+		repo   = eventsource.NewRepository(flight, eventsource.WithMarshaler(marshaler))
+		bus    = eventsource.NewCommandBus(repo, logcmd{})
+	)
 
 	bus.Send(ctx, ReadyFlight{eventsource.Command{ID: flight.AggregateRootID()}})
 	aggregate, err := repo.GetByID(ctx, flight.AggregateRootID())

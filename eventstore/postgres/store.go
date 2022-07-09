@@ -77,7 +77,7 @@ func (s *store) GetEventsForAggregate(ctx context.Context, agrID string, version
 
 	history := make(eventsource.History, 0, version+1)
 	for rows.Next() {
-		var rec eventsource.Model
+		var rec eventsource.EventModel
 		err := rows.Scan(&rec.Version, &rec.Data, &rec.At)
 		if err != nil {
 			return eventsource.History{}, err
